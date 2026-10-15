@@ -34,14 +34,21 @@ def window_ids(d):
 
 
 def prediction_error(d, j):
-    """Measured minus predicted state, j steps ahead (rows where both exist in one window)."""
+    """Measured minus predicted state for horizon step j.
+
+    Returns (i, k, e): solve rows i, the measurement rows k they predicted and
+    e = x0[k] - x_pred[i, j]. With delay compensation, stage 0 of the horizon is
+    delay_steps ahead of the measurement, so k = i + delay_steps + j.
+    """
     n = len(d['t_loop'])
     win = window_ids(d)
-    i = np.arange(n - j)
-    ok = (win[i] == win[i + j]) & np.isfinite(d['x_pred'][i, j]).all(axis=1) \
-         & np.isfinite(d['x0'][i + j]).all(axis=1)
-    i = i[ok]
-    return i, d['x0'][i + j] - d['x_pred'][i, j].astype(np.float64)
+    k_off = int(d['meta'].get('delay_steps', 0)) + j
+    i = np.arange(max(n - k_off, 0))
+    k = i + k_off
+    ok = (win[i] == win[k]) & np.isfinite(d['x_pred'][i, j]).all(axis=1) \
+         & np.isfinite(d['x0'][k]).all(axis=1)
+    i, k = i[ok], k[ok]
+    return i, k, d['x0'][k] - d['x_pred'][i, j].astype(np.float64)
 
 
 def report(d):
@@ -69,7 +76,7 @@ def report(d):
         f'{n_} {100 * np.mean(tu[:, i] > 1):.1f}%' for i, n_ in enumerate(('x', 'y', 'z'))) +
         f'   (max |unclipped| {np.nanmax(tu, axis=0).round(2).tolist()})')
     for j in (1, 5):
-        _, e = prediction_error(d, j)
+        _, _, e = prediction_error(d, j)
         if len(e):
             rms = np.sqrt(np.mean(e**2, axis=0))
             print(f'  prediction error {j} step(s) ahead: pos {np.linalg.norm(rms[0:3]):.3f} m, '
@@ -77,6 +84,7 @@ def report(d):
                   f'rates x/y/z {rms[10]:.2f} / {rms[11]:.2f} / {rms[12]:.2f} rad/s')
     if 'W_diag' in m:
         print(f'  W diag {m["W_diag"]}')
+    print(f'  delay compensation: {m.get("delay_steps", 0)} step(s)')
 
 
 def plot_all(d, out_dir):
@@ -180,12 +188,12 @@ def plot_all(d, out_dir):
     fig, ax = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
     ax[0].plot(t, x[:, 11], color='k', lw=1.2, label='measured ωy')
     for j in (1, 3, 5):
-        i, _ = prediction_error(d, j)
-        ax[0].plot(t[i + j], d['x_pred'][i, j, 11], lw=0.8, label=f'predicted {j} step(s) earlier')
+        i, k, _ = prediction_error(d, j)
+        ax[0].plot(t[k], d['x_pred'][i, j, 11], lw=0.8, label=f'horizon step {j}')
     ax[0].set(ylabel='ωy [rad/s]', title='Pitch rate: measured vs what the MPC predicted')
     ax[0].legend(loc='upper right', ncol=2)
     jj = np.arange(1, m['N'] + 1)
-    rms = np.array([np.sqrt(np.mean(prediction_error(d, j)[1][:, 10:13]**2, axis=0)) for j in jj])
+    rms = np.array([np.sqrt(np.mean(prediction_error(d, j)[2][:, 10:13]**2, axis=0)) for j in jj])
     ax[1].remove()
     ax[1] = fig.add_subplot(3, 1, 2)
     for k, n in enumerate('xyz'):
@@ -193,9 +201,9 @@ def plot_all(d, out_dir):
     ax[1].set(xlabel='prediction horizon [ms]', ylabel='RMS error [rad/s]',
               title='Body-rate prediction error vs horizon')
     ax[1].legend(loc='upper left')
-    i, e = prediction_error(d, 5)
-    ax[2].plot(t[i + 5], e[:, 2], lw=0.9, label='z error, 5 steps ahead [m]')
-    ax[2].plot(t[i + 5], e[:, 5], lw=0.9, label='vz error, 5 steps ahead [m/s]')
+    _, k, e = prediction_error(d, 5)
+    ax[2].plot(t[k], e[:, 2], lw=0.9, label='z error, horizon step 5 [m]')
+    ax[2].plot(t[k], e[:, 5], lw=0.9, label='vz error, horizon step 5 [m/s]')
     ax[2].set(xlabel='t [s]', ylabel='measured − predicted')
     ax[2].legend(loc='upper right')
     marks(ax[0])

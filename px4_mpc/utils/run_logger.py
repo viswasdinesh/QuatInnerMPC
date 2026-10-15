@@ -25,11 +25,12 @@ FIELDS = {
     't_pub':        (),       # setpoints published
     'solve_time':   (),       # acados time_tot [s]
     'status':       (),       # acados status, 0 = success
-    'traj_idx':     (),       # reference index used for stage 0
+    'traj_idx':     (),       # trajectory index at the measurement (stage 0 uses + delay_steps)
     'nav_state':    (),
     # MPC input
-    'x0':           (13,),    # [p, v, q(wxyz), w]  state given to the solver
-    'x_ref':        (13,),    # stage-0 reference
+    'x0':           (13,),    # [p, v, q(wxyz), w]  measured state
+    'x_comp':       (13,),    # x0 propagated delay_steps ahead = state given to the solver
+    'x_ref':        (13,),    # stage-0 reference (delay_steps ahead of traj_idx)
     # MPC output
     'u_raw':        (4,),     # [F N, τx τy τz Nm FLU]   NaN on failed solve
     'torque_unclipped': (3,), # τ_FRD / tau_max before clipping to ±1

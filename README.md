@@ -264,6 +264,7 @@ PC:  PX4 SITL (uxrce_dds_client) ⇄ Gazebo (local)
    ros2 launch px4_mpc mpc_inner_launch.py trajectory_path:=$HOME/trajectories/hover.npz rviz:=false
    ```
    `rviz:=false` is required unless `px4_offboard` is installed: with RViz enabled the launch starts its `visualizer` node and fails with `package 'px4_offboard' not found`.
+   `delay_steps:=<n>` (default `2`, 20 ms each) sets the actuation-delay compensation: before every solve the measured state is propagated `n` steps through the commands already sent, and the reference is shifted by the same amount. SITL measured about 2 steps of delay end to end; without compensation the controller tolerates at most 2, so 0 is not recommended. `log_dir:=<path>` changes where node logs go (`''` disables them).
 
 6. **Take off with PX4, then hand over**
    The node does not take off. Take off in Position mode (or `commander takeoff`), hover close to the trajectory's first point and heading, then switch to OFFBOARD. The trajectory index starts on the first armed OFFBOARD step, so a large offset at the switch becomes a step in the reference.

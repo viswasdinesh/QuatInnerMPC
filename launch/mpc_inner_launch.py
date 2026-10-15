@@ -16,6 +16,7 @@ from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 import tempfile
@@ -35,6 +36,17 @@ def generate_launch_description():
         description='Absolute path to a pre-generated trajectory.npz file. '
                     'Leave empty to use the default static hover at z=3 m.')
 
+    delay_arg = DeclareLaunchArgument(
+        'delay_steps',
+        default_value='2',
+        description='Control steps (20 ms each) the state is propagated ahead to '
+                    'compensate actuation delay; 0 disables compensation')
+
+    log_dir_arg = DeclareLaunchArgument(
+        'log_dir',
+        default_value='~/mpc_logs',
+        description='Folder for per-step MPC run logs (empty string disables logging)')
+
     rviz_arg = DeclareLaunchArgument(
         'rviz',
         default_value='true',
@@ -47,6 +59,8 @@ def generate_launch_description():
     return LaunchDescription([
         namespace_arg,
         traj_path_arg,
+        delay_arg,
+        log_dir_arg,
         rviz_arg,
 
         # ── MPC controller node ────────────────────────────────────────
@@ -60,6 +74,8 @@ def generate_launch_description():
             parameters=[
                 {'namespace':        namespace},
                 {'trajectory_path':  trajectory_path},
+                {'delay_steps':      ParameterValue(LaunchConfiguration('delay_steps'), value_type=int)},
+                {'log_dir':          ParameterValue(LaunchConfiguration('log_dir'), value_type=str)},
             ]
         ),
 

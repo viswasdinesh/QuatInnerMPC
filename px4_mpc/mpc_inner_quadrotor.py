@@ -34,6 +34,7 @@ except ImportError:
 import json
 import sys
 import time
+from collections import deque
 
 import rclpy
 import numpy as np
@@ -62,6 +63,10 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         traj_path = self.get_parameter('trajectory_path').value
         self.declare_parameter('log_dir', '~/mpc_logs')   # empty string disables logging
         log_dir = self.get_parameter('log_dir').value
+        # Control steps between the state sample and the command taking effect
+        # (estimator + network + allocator + motor lag). 0 disables compensation.
+        self.declare_parameter('delay_steps', 2)
+        self.delay_steps = int(self.get_parameter('delay_steps').value)
 
         # ── QoS ───────────────────────────────────────────────────────────
         qos_pub = QoSProfile(
@@ -134,6 +139,12 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         self.traj_idx = 0
         self._solver_warmed_up = False  # set False whenever guard blocks; triggers warm-start on re-entry
 
+        # ── Delay compensation ────────────────────────────────────────────
+        # Commands sent but not yet acting on the measured state, oldest first.
+        self.u_hover = np.array([self.model.mass * 9.81, 0.0, 0.0, 0.0])
+        self._u_hist = deque(maxlen=max(self.delay_steps, 1))
+        self.mpc.integrator.set('p', np.zeros(self.model.get_acados_model().p.size()[0]))
+
         # ── Run logger ────────────────────────────────────────────────────
         self._active = False   # inside an armed + OFFBOARD window
         self.run_log = RunLogger(log_dir, self.mpc.N, self._log_meta(traj_path)) if log_dir else None
@@ -145,7 +156,8 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
 
         self.get_logger().info(
             f'MPCInnerQuadrotor ready. Trajectory length: {self.traj_len} steps '
-            f'({self.traj_len * self.dt:.1f} s)')
+            f'({self.traj_len * self.dt:.1f} s), delay compensation: {self.delay_steps} step(s) '
+            f'({self.delay_steps * self.dt * 1e3:.0f} ms)')
 
     # ──────────────────────────────────────────────────────────────────────
     #  Trajectory loading
@@ -184,6 +196,7 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             'mass': self.model.mass, 'kf': self.model.kf,
             'omega_min': self.model.omega_min, 'omega_max': self.model.omega_max,
             'F_max': self.F_max, 'tau_max': np.asarray(self.tau_max).tolist(),
+            'delay_steps': self.delay_steps,
         }
         # Cost weights as compiled into the loaded solver.
         mpc_dir = os.path.dirname(sys.modules[MultirotorInnerMPC.__module__].__file__)
@@ -276,11 +289,18 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
 
         if not self._active:
             self._active = True
+            # Before OFFBOARD, PX4's own controllers were holding a hover.
+            self._u_hist.clear()
+            self._u_hist.extend([self.u_hover] * self.delay_steps)
             if self.run_log is not None:
                 self.run_log.start_window()
 
         # ── 2. State vector  [p, v, q, w]  shape (13,) ────────────────────
         x0 = np.concatenate([self.p, self.v, self.q, self.w])
+
+        # ── Delay compensation: plan from where the vehicle will be when this
+        # command takes effect, by replaying the commands still in flight.
+        x_comp = self._propagate(x0)
 
         # ── Warm-start on first entry into active control ──────────────────
         # Acados initialises all stages to the x0 from setup (z=0, level).
@@ -293,7 +313,7 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             F_hover = self.model.mass * 9.81   # ~19.6 N
             u_init  = np.array([F_hover, 0.0, 0.0, 0.0])
             for i in range(self.mpc.N + 1):
-                self.mpc.ocp_solver.set(i, "x", x0)
+                self.mpc.ocp_solver.set(i, "x", x_comp)
             for i in range(self.mpc.N):
                 self.mpc.ocp_solver.set(i, "u", u_init)
             self._solver_warmed_up = True
@@ -303,8 +323,9 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         # Each stage k receives the reference at time t + k·dt so the MPC
         # looks ahead along the trajectory, not just at a static point.
         # model.p = [p_ref(3), v_ref(3), q_ref(4), w_ref(3)]  → 13 values
+        # Stage 0 is delay_steps ahead of the measurement, so is its reference.
         for k in range(self.mpc.N + 1):
-            idx = min(self.traj_idx + k, self.traj_len - 1)
+            idx = min(self.traj_idx + self.delay_steps + k, self.traj_len - 1)
             p_param = np.concatenate([
                 self.traj_p[idx],   # p_ref
                 self.traj_v[idx],   # v_ref
@@ -314,9 +335,9 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             self.mpc.ocp_solver.set(k, "p", p_param)
 
         # ── 4. Solve ───────────────────────────────────────────────────────
-        idx0 = min(self.traj_idx, self.traj_len - 1)
+        idx0 = min(self.traj_idx + self.delay_steps, self.traj_len - 1)
         log_row = dict(
-            t_loop=t_loop, traj_idx=self.traj_idx, nav_state=self.nav_state, x0=x0,
+            t_loop=t_loop, traj_idx=self.traj_idx, nav_state=self.nav_state, x0=x0, x_comp=x_comp,
             x_ref=np.concatenate([self.traj_p[idx0], self.traj_v[idx0],
                                   self.traj_q[idx0], self.traj_w[idx0]]),
             age_att=t_loop - self._rx_time['att'],
@@ -327,10 +348,13 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             px4_ts_lpos=self._px4_ts['lpos'],
         )
         try:
-            simU, simX = self.mpc.solve(x0)
+            simU, simX = self.mpc.solve(x_comp)
         except Exception as e:
             self.get_logger().warn(f'MPC solve failed: {e}')
             self._solver_warmed_up = False   # force re-seed on next call
+            # Nothing is published, so PX4 keeps applying the previous command.
+            if self.delay_steps:
+                self._u_hist.append(self._u_hist[-1])
             if self.run_log is not None:
                 self.run_log.log(**log_row, t_solved=time.time(),
                                  status=self.mpc.ocp_solver.get_status(),
@@ -396,9 +420,22 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
                               self.traj_w[idx_d][2]])                 # R4 [g, ω_ref]
         self.ecrl_log_step(x_ecrl, x_d_ecrl, u_ecrl, u_d_ecrl)
 
+        if self.delay_steps:
+            self._u_hist.append(u0.astype(float))
+
         # ── 10. Advance trajectory index ───────────────────────────────────
         # Advance every control step; hold at last point when done.
         self.traj_idx = min(self.traj_idx + 1, self.traj_len - 1)
+
+    def _propagate(self, x):
+        """Integrate x forward through the commands still in flight (one dt each)."""
+        if not self.delay_steps:
+            return x
+        x = x.copy()
+        for u in self._u_hist:
+            x = self.mpc.integrator.simulate(x=x, u=u)
+            x[6:10] /= np.linalg.norm(x[6:10])
+        return x
 
     def _save_run_log(self):
         if self.run_log is not None:
