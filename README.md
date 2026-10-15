@@ -143,3 +143,7 @@ px4_mpc/controllers/                OCP, weights, codegen
 px4_mpc/utils/                      trajectories, logger, plotters, benchmark
 docs/results/                       figures
 ```
+
+## 🙏 Acknowledgements
+
+Built on [**px4-mpc**](https://github.com/Jaeyoung-Lim/px4-mpc) by [Jaeyoung Lim](https://github.com/Jaeyoung-Lim). The package structure, the acados model/controller layout and the `px4_mpc` name come from that project.
