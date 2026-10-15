@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>px4_mpc</name>
+  <version>0.1.0</version>
+  <description>Quaternion inner-loop NMPC (acados) for PX4 multirotors, commanding thrust and torque setpoints.</description>
+  <maintainer email="viswasdinesh28@gmail.com">Dinesh</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>px4_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <!-- casadi and acados_template are installed via pip / the acados build, not rosdep -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
