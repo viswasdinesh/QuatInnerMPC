@@ -19,16 +19,6 @@ Replaces PX4's position, attitude and rate loops. At 50 Hz the node solves a 20-
 
 ## 🧠 How it works
 
-```mermaid
-flowchart LR
-    PX4["PX4<br/>EKF2 · allocator"] -- "attitude, rates,<br/>position, status" --> N
-    subgraph N["mpc_inner_quadrotor · 50 Hz"]
-        direction LR
-        A["NED/FRD → ENU/FLU"] --> B["delay<br/>compensation"] --> C["acados<br/>N=20, 0.4 s"] --> D["N, Nm →<br/>normalised"]
-    end
-    D -- "thrust & torque<br/>setpoints" --> PX4
-```
-
 - **Runs only when armed + OFFBOARD.** The node never arms or takes off.
 - **Delay compensation:** before each solve, the measured state is integrated through the last `delay_steps` commands, which are sent but not yet acting on the vehicle.
 - **Model:** a rigid body. State `[p, v, q, ω]` (ENU / FLU), input `[F, τx, τy, τz]` in N and Nm. No drag, motor dynamics or delay.
@@ -54,33 +44,6 @@ generate_circle_trajectory(60.0, 0.02, 3.0, 3.0, 0.1, '$HOME/trajectories/circle
 
 The acados solver is generated in `px4_mpc/mpc_codegen/` on first start (about 15 s) and reused afterwards. It regenerates automatically when weights or constraints change; delete the folder after changing the model.
 
-## 🌐 SITL: PX4 + Gazebo on a PC, MPC on the Pi
-
-```mermaid
-flowchart LR
-    MPC["MPC node"] <--> AG["MicroXRCEAgent :8888"]
-    AG <-- "UDP" --> CL["PX4 SITL"] <--> GZ["Gazebo"]
-    subgraph Pi
-        MPC
-        AG
-    end
-    subgraph PC
-        CL
-        GZ
-    end
-```
-
-| Where | Step |
-|:--|:--|
-| Pi | `MicroXRCEAgent udp4 -p 8888` |
-| PC | `export ROS_DOMAIN_ID=<Pi's ID>` in the same shell, then `make px4_sitl gz_x500` |
-| PC `pxh>` | `uxrce_dds_client stop` then `uxrce_dds_client start -t udp -h <PI_IP> -p 8888` (or persist it with `param set UXRCE_DDS_AG_IP <int32 IP>`) |
-| Pi | check: `ros2 topic hz /fmu/out/vehicle_attitude` |
-| Pi | `ros2 launch px4_mpc mpc_inner_launch.py trajectory_path:=$HOME/trajectories/hover.npz rviz:=false` |
-| PX4 | take off, hover near the trajectory start, switch to **OFFBOARD** |
-
-> [!IMPORTANT]
-> If `px4_msgs` doesn't match PX4, topics silently stop arriving or decode as garbage. Check out the `px4_msgs` commit titled `Update to PX4 <hash>` that matches your PX4 commit.
 
 ## ⚙️ Configuration
 
