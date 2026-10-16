@@ -187,8 +187,9 @@ def generate_figure8_trajectory(t_total: float, dt: float,
     d2   = d**2
 
     dx = scale * omega * (np.cos(ot) * d + 2.0 * np.sin(ot)**2 * np.cos(ot)) / d2
+    # y = scale·sin·cos/d, d' = −2·sin·cos·ω  →  y' = scale·ω·(cos2·d + 2·sin²·cos²)/d²
     dy = scale * omega * (
-        (np.cos(2*ot) * d + 2.0 * np.sin(ot)*np.cos(ot)**2 * 2.0*np.sin(ot)) / d2
+        (np.cos(2*ot) * d + 2.0 * np.sin(ot)**2 * np.cos(ot)**2) / d2
     )
 
     p = np.stack([x, y, np.full(M, height)], axis=1)
@@ -202,8 +203,9 @@ def generate_figure8_trajectory(t_total: float, dt: float,
         np.sin(yaw / 2),
     ], axis=1)
 
-    # Approximate yaw rate via finite difference
-    yaw_rate    = np.gradient(yaw, dt)
+    # Yaw rate via finite difference; unwrap first, otherwise every ±π crossing
+    # of arctan2 becomes a ±2π/(2·dt) ≈ 157 rad/s spike in the reference.
+    yaw_rate    = np.gradient(np.unwrap(yaw), dt)
     w           = np.zeros((M, 3))
     w[:, 2]     = yaw_rate
 

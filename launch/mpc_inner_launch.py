@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 ############################################################################
-# mpc_quadrotor_launch.py
+# mpc_inner_launch.py
 # Launch file for the quaternion MPC inner-loop controller on PX4 x500.
 #
 # Usage (SITL):
-#   ros2 launch px4_mpc mpc_quadrotor_launch.py \
+#   ros2 launch px4_mpc mpc_inner_launch.py \
 #       trajectory_path:=/path/to/trajectory.npz
 #
 # Usage (hover, no trajectory file needed):
-#   ros2 launch px4_mpc mpc_quadrotor_launch.py
+#   ros2 launch px4_mpc mpc_inner_launch.py
 ############################################################################
 
 from launch import LaunchDescription
@@ -32,15 +32,27 @@ def generate_launch_description():
 
     traj_path_arg = DeclareLaunchArgument(
         'trajectory_path',
-        default_value='/home/dinesh/trajectories/takeoff.npz',
-        description='Absolute path to a pre-generated trajectory.npz file. '
-                    'Leave empty to use the default static hover at z=3 m.')
+        default_value='',
+        description='Path to a pre-generated trajectory .npz (~ is expanded). '
+                    'Empty: static hover at (0, 0, 3). A missing file is an error.')
+
+    rate_arg = DeclareLaunchArgument(
+        'control_rate',
+        default_value='120.0',
+        description='Control loop rate [Hz]; the MPC grid keeps a 0.4 s horizon with '
+                    '20 stages (first stages = one period)')
 
     delay_arg = DeclareLaunchArgument(
-        'delay_steps',
-        default_value='2',
-        description='Control steps (20 ms each) the state is propagated ahead to '
-                    'compensate actuation delay; 0 disables compensation')
+        'actuation_delay',
+        default_value='0.04',
+        description='Delay [s] between state sample and command taking effect; the state '
+                    'is propagated this far ahead before each solve (0 disables)')
+
+    max_age_arg = DeclareLaunchArgument(
+        'max_state_age',
+        default_value='0.2',
+        description='Max age [s] of PX4 state inputs; older inputs are propagated through '
+                    'the commands sent since, beyond this the node stops commanding')
 
     log_dir_arg = DeclareLaunchArgument(
         'log_dir',
@@ -59,7 +71,9 @@ def generate_launch_description():
     return LaunchDescription([
         namespace_arg,
         traj_path_arg,
+        rate_arg,
         delay_arg,
+        max_age_arg,
         log_dir_arg,
         rviz_arg,
 
@@ -74,7 +88,9 @@ def generate_launch_description():
             parameters=[
                 {'namespace':        namespace},
                 {'trajectory_path':  trajectory_path},
-                {'delay_steps':      ParameterValue(LaunchConfiguration('delay_steps'), value_type=int)},
+                {'control_rate':     ParameterValue(LaunchConfiguration('control_rate'), value_type=float)},
+                {'actuation_delay':  ParameterValue(LaunchConfiguration('actuation_delay'), value_type=float)},
+                {'max_state_age':    ParameterValue(LaunchConfiguration('max_state_age'), value_type=float)},
                 {'log_dir':          ParameterValue(LaunchConfiguration('log_dir'), value_type=str)},
             ]
         ),

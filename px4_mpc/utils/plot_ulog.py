@@ -8,9 +8,9 @@
 #
 # Requires pyulog (pip install pyulog).
 #
-# Reference alignment: the node starts its trajectory index on the first
-# control step with nav_state == OFFBOARD and armed, then advances one sample
-# per 20 ms step. The same instant is taken from vehicle_status here, so the
+# Reference alignment: the node starts its trajectory on the first control
+# step with nav_state == OFFBOARD and armed, then advances one control period
+# per step, so the reference at time t after that instant is traj(t). The same instant is taken from vehicle_status here, so the
 # reference is accurate to about one control step. The index never resets,
 # so only the first OFFBOARD+armed window is plotted.
 #
@@ -308,11 +308,13 @@ def main():
     parser.add_argument('--out', default='', help='output dir (default: <ulog>_plots)')
     parser.add_argument('--settle', type=float, default=5.0,
                         help='seconds after offboard start excluded from metrics')
-    parser.add_argument('--dt', type=float, default=0.02, help='node control period [s]')
+    parser.add_argument('--dt', type=float, default=0.0,
+                        help='trajectory sample spacing [s] (default: from the file\'s t)')
     args = parser.parse_args()
 
     traj = dict(np.load(args.traj))
-    f = build_flight(load_ulog(args.ulog), traj, args.dt)
+    dt = args.dt or (float(traj['t'][1] - traj['t'][0]) if 't' in traj else 0.02)
+    f = build_flight(load_ulog(args.ulog), traj, dt)
     report(f, args.settle)
     out = args.out or os.path.splitext(args.ulog)[0] + '_plots'
     for p in plot_all(f, out, args.settle):

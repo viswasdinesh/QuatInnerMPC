@@ -24,7 +24,8 @@ FIELDS = {
     't_solved':     (),       # solve returned
     't_pub':        (),       # setpoints published
     'solve_time':   (),       # acados time_tot [s]
-    'status':       (),       # acados status, 0 = success
+    'status':       (),       # acados status, 0 = success; -2 = skipped, state older than max_state_age
+    'stale_steps':  (),       # extra propagation steps for a stale state (beyond delay_steps)
     'traj_idx':     (),       # trajectory index at the measurement (stage 0 uses + delay_steps)
     'nav_state':    (),
     # MPC input

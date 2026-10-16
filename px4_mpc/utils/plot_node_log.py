@@ -38,11 +38,13 @@ def prediction_error(d, j):
 
     Returns (i, k, e): solve rows i, the measurement rows k they predicted and
     e = x0[k] - x_pred[i, j]. With delay compensation, stage 0 of the horizon is
-    delay_steps ahead of the measurement, so k = i + delay_steps + j.
+    delay_steps ahead of the measurement and stage j starts stage_offsets[j]
+    control periods after stage 0, so k = i + delay_steps + stage_offsets[j].
     """
     n = len(d['t_loop'])
     win = window_ids(d)
-    k_off = int(d['meta'].get('delay_steps', 0)) + j
+    offsets = d['meta'].get('stage_offsets') or list(range(d['meta']['N'] + 1))
+    k_off = int(d['meta'].get('delay_steps', 0)) + int(offsets[j])
     i = np.arange(max(n - k_off, 0))
     k = i + k_off
     ok = (win[i] == win[k]) & np.isfinite(d['x_pred'][i, j]).all(axis=1) \
@@ -58,8 +60,16 @@ def report(d):
     lat = (d['t_pub'] - d['t_loop'])[ok] * 1e3
     print(f'{n} control steps in {len(d["window_start"])} OFFBOARD window(s), '
           f'trajectory: {m.get("trajectory_path") or "default hover"}')
-    print(f'  failed solves {np.sum(~ok)} '
-          f'(statuses {sorted(set(d["status"][~ok].astype(int).tolist()))})')
+    skipped = d['status'] == -2
+    failed = ~ok & ~skipped
+    print(f'  failed solves {np.sum(failed)} '
+          f'(statuses {sorted(set(d["status"][failed].astype(int).tolist()))}), '
+          f'skipped for stale state {np.sum(skipped)} (max_state_age '
+          f'{m.get("max_state_age", float("nan")) * 1e3:.0f} ms)')
+    if 'stale_steps' in d:
+        ss = d['stale_steps'][ok]
+        print(f'  stale-state propagation: {np.sum(ss > 0)} steps needed extra steps '
+              f'(max {int(np.nanmax(ss)) if np.any(np.isfinite(ss)) else 0})')
     st = d['solve_time'][np.isfinite(d['solve_time'])] * 1e3
     print(f'  solve time  p50 {np.median(st):.2f}  p99 {np.percentile(st, 99):.2f}  max {st.max():.2f} ms')
     print(f'  callback→publish  p50 {np.median(lat):.2f}  p99 {np.percentile(lat, 99):.2f}  '
@@ -197,7 +207,8 @@ def plot_all(d, out_dir):
     ax[1].remove()
     ax[1] = fig.add_subplot(3, 1, 2)
     for k, n in enumerate('xyz'):
-        ax[1].plot(jj * dt * 1e3, rms[:, k], 'o-', ms=3, label=f'ω{n}')
+        ax[1].plot(np.asarray(m.get('stage_offsets') or range(m['N'] + 1))[jj] * dt * 1e3,
+                   rms[:, k], 'o-', ms=3, label=f'ω{n}')
     ax[1].set(xlabel='prediction horizon [ms]', ylabel='RMS error [rad/s]',
               title='Body-rate prediction error vs horizon')
     ax[1].legend(loc='upper left')

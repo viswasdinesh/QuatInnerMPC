@@ -9,18 +9,28 @@
 ![Raspberry Pi 5](https://img.shields.io/badge/Raspberry_Pi_5-C51A4A?logo=raspberrypi&logoColor=white)
 ![Status](https://img.shields.io/badge/status-SITL_validated-2E7D32)
 
-<img src="docs/results/circle_path.png" width="720" alt="SITL circle tracking">
+<table>
+<tr>
+<td align="center"><img src="docs/results/circle_top.png" height="300" alt="SITL circle tracking"></td>
+<td align="center"><img src="docs/results/figure8_top.png" height="300" alt="SITL figure-8 tracking"></td>
+</tr>
+<tr>
+<td align="center"><sub>3 m circle, 1.9 m/s · 11 cm RMS</sub></td>
+<td align="center"><sub>6 × 2 m figure-8, up to 1.9 m/s · 16 cm RMS</sub></td>
+</tr>
+</table>
 
-*SITL, Gazebo `gz_x500`: 3 m circle at 1.9 m/s, 11 cm RMS, MPC on a Raspberry Pi 5 (2.2 ms per solve)*
+*SITL, Gazebo `gz_x500`, MPC on a Raspberry Pi 5 (about 2 ms per solve)*
 
 </div>
 
-Replaces PX4's position, attitude and rate loops. At 50 Hz the node solves a 20-step OCP from the full state and sends normalised thrust and torque to PX4's allocator (`thrust_and_torque` offboard mode).
+Replaces PX4's position, attitude and rate loops. At 120 Hz the node solves a 20-stage, 0.4 s OCP from the full state and sends normalised thrust and torque to PX4's allocator (`thrust_and_torque` offboard mode).
 
 ## 🧠 How it works
 
 - **Runs only when armed + OFFBOARD.** The node never arms or takes off.
-- **Delay compensation:** before each solve, the measured state is integrated through the last `delay_steps` commands, which are sent but not yet acting on the vehicle.
+- **Time grid:** the first 6 stages are one control period (8.33 ms) and the remaining 14 are 25 ms, keeping a 0.4 s horizon at the cost of an N = 20 solve (1.8 ms on the Pi). References are sampled at each stage's actual time; trajectory files are resampled to the control period when loaded.
+- **Delay compensation:** before each solve, the measured state is integrated through the commands sent in the last `actuation_delay` seconds, which are sent but not yet acting on the vehicle. If no new state has arrived for more than one step, it is also integrated through the commands sent since. Beyond `max_state_age` the node stops commanding and withholds the heartbeat, so PX4's offboard-loss failsafe takes over.
 - **Model:** a rigid body. State `[p, v, q, ω]` (ENU / FLU), input `[F, τx, τy, τz]` in N and Nm. No drag, motor dynamics or delay.
 - **Cost:** nonlinear least squares on position, velocity, quaternion-error vector, body-rate and `u − u_hover` residuals against a per-stage reference. Bounds: `0 ≤ F ≤ F_max`, `|τ| ≤ τ_max`.
 - **Solver:** SQP-RTI (Gauss-Newton), HPIPM partial condensing, explicit RK4 (3 steps per interval).
@@ -49,12 +59,14 @@ The acados solver is generated in `px4_mpc/mpc_codegen/` on first start (about 1
 
 | Launch argument | Default | |
 |:--|:--|:--|
-| `trajectory_path` | `/home/dinesh/…/takeoff.npz` | missing file → static hover at (0, 0, 3) |
-| `delay_steps` | `2` | steps of 20 ms to propagate ahead; `0` = off |
+| `trajectory_path` | `''` | `~` is expanded; empty → static hover at (0, 0, 3); missing file → node refuses to start |
+| `control_rate` | `120` | Hz; any rate whose 0.4 s grid fits (50 → uniform 20 × 20 ms) |
+| `actuation_delay` | `0.04` | s to propagate ahead (rounded to whole periods); `0` = off |
+| `max_state_age` | `0.2` | s; older state → stop commanding (set PX4's `COM_OF_LOSS_T` short) |
 | `log_dir` | `~/mpc_logs` | `''` disables logging |
 | `rviz` | `true` | use `false` unless `px4_offboard` is installed |
 
-**`delay_steps`:** SITL measured about 2 steps (40 ms) of delay end to end. Without compensation the loop tolerates at most 2 steps, so it was at the edge. Being one step off either way is safe; a fast (~7 Hz) oscillation means the value is too high.
+**`actuation_delay`:** SITL measured about 40 ms end to end. Without compensation the loop diverges somewhere between 40 and 60 ms, at 50 Hz and 120 Hz alike, so it was at the edge; a faster loop doesn't add margin. With 40 ms set, the simulated loop tolerates real delays up to about 75 ms. A fast oscillation means the value is too high.
 
 **Model** (`models/multirotor_inner_model.py`, Gazebo x500 values): mass 2.0 kg, J = diag(0.0217, 0.0217, 0.04) kg·m², arms ±0.174 m, τ_max = 2.97 / 2.97 / 0.55 Nm, F_max = 34.2 N.
 
@@ -73,7 +85,7 @@ python3 -m px4_mpc.utils.plot_ulog <log>.ulg --traj <trajectory>.npz  # PX4 log 
 
 **Hover, with and without delay compensation:**
 
-| | `delay_steps:=0` | `delay_steps:=2` |
+| (50 Hz) | no compensation | 40 ms compensation |
 |:--|:--:|:--:|
 | Pitch rate | ±7 rad/s, 3.4 Hz | **±0.01 rad/s** |
 | Motors pinned at 0 or 1 | 73% | **0%** |
@@ -84,9 +96,11 @@ python3 -m px4_mpc.utils.plot_ulog <log>.ulg --traj <trajectory>.npz  # PX4 log 
 |:--:|:--:|
 | ![](docs/results/hover_rates_no_comp.png) | ![](docs/results/hover_rates_comp2.png) |
 
-**Circle** (r = 3 m, 1.9 m/s): 11.4 cm horizontal RMS (radial 3.1 cm, along-track 10.6 cm behind), yaw 3.4° behind, 0 solver failures. It recovered from a 3 m / 100° reference jump at the start within 5 s.
+**Circle** (r = 3 m, 1.9 m/s, 50 Hz): 11.4 cm horizontal RMS (radial 3.1 cm, along-track 10.6 cm behind), yaw 3.4° behind, 0 solver failures. It recovered from a 3 m / 100° reference jump at the start within 5 s.
 
 ![Circle position tracking](docs/results/circle_position.png)
+
+**Figure-8** (6 × 2 m, up to 1.9 m/s, 120 Hz): 16 cm horizontal RMS, yaw 3.0° RMS, 0 solver failures, solve 1.8 ms. At 49 s a burst of Wi-Fi stalls (state up to 129 ms old) during the tightest part of a lobe caused a 2 m altitude dip, which it recovered from.
 
 ## 🗺️ Known issues
 

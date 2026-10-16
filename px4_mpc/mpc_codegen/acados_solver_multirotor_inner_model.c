@@ -440,33 +440,54 @@ void multirotor_inner_model_acados_setup_nlp_in(multirotor_inner_model_solver_ca
     {
         // set time_steps
     
-        double time_step = 0.02;
+        double* time_steps = malloc(N*sizeof(double));
+        time_steps[0] = 0.008333333333333333;
+        time_steps[1] = 0.008333333333333333;
+        time_steps[2] = 0.008333333333333333;
+        time_steps[3] = 0.008333333333333333;
+        time_steps[4] = 0.008333333333333333;
+        time_steps[5] = 0.008333333333333333;
+        time_steps[6] = 0.025;
+        time_steps[7] = 0.025;
+        time_steps[8] = 0.025;
+        time_steps[9] = 0.025;
+        time_steps[10] = 0.025;
+        time_steps[11] = 0.025;
+        time_steps[12] = 0.025;
+        time_steps[13] = 0.025;
+        time_steps[14] = 0.025;
+        time_steps[15] = 0.025;
+        time_steps[16] = 0.025;
+        time_steps[17] = 0.025;
+        time_steps[18] = 0.025;
+        time_steps[19] = 0.025;
         for (int i = 0; i < N; i++)
         {
-            ocp_nlp_in_set(nlp_config, nlp_dims, nlp_in, i, "Ts", &time_step);
+            ocp_nlp_in_set(nlp_config, nlp_dims, nlp_in, i, "Ts", &time_steps[i]);
         }
+        free(time_steps);
         // set cost scaling
         double* cost_scaling = malloc((N+1)*sizeof(double));
-        cost_scaling[0] = 0.02;
-        cost_scaling[1] = 0.02;
-        cost_scaling[2] = 0.02;
-        cost_scaling[3] = 0.02;
-        cost_scaling[4] = 0.02;
-        cost_scaling[5] = 0.02;
-        cost_scaling[6] = 0.02;
-        cost_scaling[7] = 0.02;
-        cost_scaling[8] = 0.02;
-        cost_scaling[9] = 0.02;
-        cost_scaling[10] = 0.02;
-        cost_scaling[11] = 0.02;
-        cost_scaling[12] = 0.02;
-        cost_scaling[13] = 0.02;
-        cost_scaling[14] = 0.02;
-        cost_scaling[15] = 0.02;
-        cost_scaling[16] = 0.02;
-        cost_scaling[17] = 0.02;
-        cost_scaling[18] = 0.02;
-        cost_scaling[19] = 0.02;
+        cost_scaling[0] = 0.008333333333333333;
+        cost_scaling[1] = 0.008333333333333333;
+        cost_scaling[2] = 0.008333333333333333;
+        cost_scaling[3] = 0.008333333333333333;
+        cost_scaling[4] = 0.008333333333333333;
+        cost_scaling[5] = 0.008333333333333333;
+        cost_scaling[6] = 0.025;
+        cost_scaling[7] = 0.025;
+        cost_scaling[8] = 0.025;
+        cost_scaling[9] = 0.025;
+        cost_scaling[10] = 0.025;
+        cost_scaling[11] = 0.025;
+        cost_scaling[12] = 0.025;
+        cost_scaling[13] = 0.025;
+        cost_scaling[14] = 0.025;
+        cost_scaling[15] = 0.025;
+        cost_scaling[16] = 0.025;
+        cost_scaling[17] = 0.025;
+        cost_scaling[18] = 0.025;
+        cost_scaling[19] = 0.025;
         cost_scaling[20] = 1;
         for (int i = 0; i <= N; i++)
         {

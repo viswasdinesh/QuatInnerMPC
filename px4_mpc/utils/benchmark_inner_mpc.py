@@ -3,9 +3,9 @@
 # Closed-loop timing benchmark for MultirotorInnerMPC (desktop or Pi 5).
 #
 # Tracks a horizontal circle at z = 3 m, closing the loop with the acados
-# integrator, and reports per-solve timing against the 20 ms (50 Hz) budget.
+# integrator, and reports per-solve timing against the control-period budget.
 #
-#   python3 -m px4_mpc.utils.benchmark_inner_mpc [--steps 1500] [--save out.npz]
+#   python3 -m px4_mpc.utils.benchmark_inner_mpc [--rate 120] [--steps 1500] [--save out.npz]
 #       [--plot tracking.png]
 #
 # Timing is reported separately for the first WARMUP_STEPS solves (cold
@@ -44,6 +44,7 @@ def stats(name, ms, budget_ms):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--steps', type=int, default=1500)
+    parser.add_argument('--rate', type=float, default=120.0, help='control rate [Hz]')
     parser.add_argument('--save', type=str, default='')
     parser.add_argument('--plot', type=str, default='inner_mpc_tracking.png',
                         help='tracking plot output path (empty to skip)')
@@ -51,11 +52,11 @@ def main():
 
     model = MultirotorInnerModel()
     t0 = time.perf_counter()
-    mpc = MultirotorInnerMPC(model)
+    mpc = MultirotorInnerMPC(model, control_rate=args.rate)
     build_s = time.perf_counter() - t0
     solver, integrator = mpc.ocp_solver, mpc.integrator
 
-    N, dt = mpc.N, mpc.Tf / mpc.N
+    N, dt, off = mpc.N, mpc.dt, mpc.stage_offsets
     budget_ms = dt * 1e3
     u_hover = np.array([model.mass * 9.81, 0.0, 0.0, 0.0])
 
@@ -74,7 +75,7 @@ def main():
 
     for i in range(K):
         for k in range(N + 1):
-            solver.set(k, 'p', circle_reference((i + k) * dt))
+            solver.set(k, 'p', circle_reference((i + off[k]) * dt))
         R[i] = circle_reference(i * dt)
 
         # Wall time includes the Python get/set overhead the ROS node pays.
@@ -100,7 +101,7 @@ def main():
     settled = pos_err[int(5.0 / dt):]   # skip the first 5 s of convergence
 
     print(f'\nMultirotorInnerMPC benchmark: {platform.machine()} {platform.processor()}')
-    print(f'  N = {N}, Tf = {mpc.Tf} s, {K} steps, build {build_s:.1f} s, '
+    print(f'  {args.rate:g} Hz, N = {N}, Tf = {mpc.Tf:.3f} s (stages {sorted(set(np.round(mpc.time_steps * 1e3, 2)))} ms), {K} steps, build {build_s:.1f} s, '
           f'failed solves {failures}')
     for label, seg in ((f'first {WARMUP_STEPS} steps (warm-up)', slice(0, WARMUP_STEPS)),
                        (f'steps {WARMUP_STEPS}-{K} (steady state)', slice(WARMUP_STEPS, K))):

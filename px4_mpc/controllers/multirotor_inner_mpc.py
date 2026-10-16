@@ -40,11 +40,37 @@ import os
 from px4_mpc.utils.costs import quat_error_cost, position_cost, velocity_cost, rate_cost, control_cost
 from px4_mpc.utils import quaternion
 
+def time_grid(control_rate, horizon=0.4, N=20, min_fine=4):
+    """Stage lengths for an N-stage horizon run at control_rate.
+
+    The first stages equal the control period (so the integrator and the
+    feedback act on one period); the remaining stages are an integer multiple
+    L of it, so every stage starts a whole number of control periods ahead.
+    Returns (time_steps, offsets) with offsets[k] = start of stage k in periods.
+    """
+    dt = 1.0 / control_rate
+    M = int(round(horizon / dt))            # horizon in control periods
+    if M <= N:                              # uniform grid (e.g. 50 Hz: 20 × 20 ms)
+        steps = np.ones(N, dtype=int)
+    else:
+        for L in range(2, 11):
+            n_long, rem = divmod(M - N, L - 1)
+            if rem == 0 and N - n_long >= min_fine:
+                steps = np.r_[np.ones(N - n_long, dtype=int), np.full(n_long, L)]
+                break
+        else:
+            raise ValueError(f'No {N}-stage grid of whole control periods spans '
+                             f'{horizon} s at {control_rate} Hz')
+    return steps * dt, np.r_[0, np.cumsum(steps)]
+
+
 class MultirotorInnerMPC():
-    def __init__(self, model):
+    def __init__(self, model, control_rate=120.0):
         self.model = model
-        self.Tf = 0.4
         self.N = 20
+        self.dt = 1.0 / control_rate                    # control period = first stage
+        self.time_steps, self.stage_offsets = time_grid(control_rate, horizon=0.4, N=self.N)
+        self.Tf = float(np.sum(self.time_steps))
 
         self.x0 = np.array([0.0, 0.0, 0.0,          # p
                             0.0, 0.0, 0.0,          # v
@@ -81,7 +107,7 @@ class MultirotorInnerMPC():
         ny_e = nx
 
         # set dimensions
-        ocp.dims.N = N_horizon
+        ocp.solver_options.N_horizon = N_horizon
 
         # set cost
         Q_mat = 2*np.diag([1e1, 1e1, 1e1, 1e1, 1e1, 1e1, 0.0, 0.1, 0.1, 0.1])
@@ -191,13 +217,17 @@ class MultirotorInnerMPC():
 
         # set prediction horizon
         ocp.solver_options.tf = Tf
+        ocp.solver_options.time_steps = self.time_steps
 
-        # Reuse the compiled solvers if present; delete mpc_codegen/ after changing the model or weights.
+        # Reuse the compiled solvers if present. acados hashes the OCP and rebuilds it
+        # when anything changed; it does not check an integrator created from an
+        # AcadosOcp, so rebuild that whenever the OCP was rebuilt (same model, tf, N).
         prebuilt = all(os.path.isfile(os.path.join(codegen_dir, f'libacados_{s}_solver_{model.name}.so'))
                        for s in ('ocp', 'sim'))
         ocp_solver = AcadosOcpSolver(ocp, json_file=json_path, generate=not prebuilt, build=not prebuilt)
+        rebuild_sim = not prebuilt or ocp_solver.generated
         # create an integrator with the same settings as used in the OCP solver.
-        acados_integrator = AcadosSimSolver(ocp, json_file=json_path, generate=not prebuilt, build=not prebuilt)
+        acados_integrator = AcadosSimSolver(ocp, json_file=json_path, generate=rebuild_sim, build=rebuild_sim)
 
         return ocp_solver, acados_integrator
     

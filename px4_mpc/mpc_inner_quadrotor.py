@@ -63,10 +63,18 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         traj_path = self.get_parameter('trajectory_path').value
         self.declare_parameter('log_dir', '~/mpc_logs')   # empty string disables logging
         log_dir = self.get_parameter('log_dir').value
-        # Control steps between the state sample and the command taking effect
+        # Control loop rate; the MPC's first stage equals one period.
+        self.declare_parameter('control_rate', 120.0)
+        control_rate = float(self.get_parameter('control_rate').value)
+        # Time between the state sample and the command taking effect
         # (estimator + network + allocator + motor lag). 0 disables compensation.
-        self.declare_parameter('delay_steps', 2)
-        self.delay_steps = int(self.get_parameter('delay_steps').value)
+        self.declare_parameter('actuation_delay', 0.04)
+        self.actuation_delay = float(self.get_parameter('actuation_delay').value)
+        # Inputs older than one step are propagated further through the commands
+        # sent since; beyond this age the node stops (heartbeat too) so PX4's
+        # offboard-loss failsafe takes over.
+        self.declare_parameter('max_state_age', 0.2)
+        self.max_state_age = float(self.get_parameter('max_state_age').value)
 
         # ── QoS ───────────────────────────────────────────────────────────
         qos_pub = QoSProfile(
@@ -127,7 +135,9 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
 
         # ── Model + MPC ───────────────────────────────────────────────────
         self.model = MultirotorInnerModel()
-        self.mpc   = MultirotorInnerMPC(self.model)
+        self.mpc   = MultirotorInnerMPC(self.model, control_rate=control_rate)
+        self.dt    = self.mpc.dt                    # control period [s]
+        self.delay_steps = int(round(self.actuation_delay / self.dt))
 
         self.F_max   = self.model.max_thrust   # 34.194 N
         self.tau_max = self.model.tau_max      # [2.975, 2.975, 0.547] Nm
@@ -135,14 +145,15 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         # ── Trajectory ────────────────────────────────────────────────────
         self._load_trajectory(traj_path)
 
-        self.dt       = self.mpc.Tf / self.mpc.N   # 0.02 s
         self.traj_idx = 0
         self._solver_warmed_up = False  # set False whenever guard blocks; triggers warm-start on re-entry
 
         # ── Delay compensation ────────────────────────────────────────────
         # Commands sent but not yet acting on the measured state, oldest first.
         self.u_hover = np.array([self.model.mass * 9.81, 0.0, 0.0, 0.0])
-        self._u_hist = deque(maxlen=max(self.delay_steps, 1))
+        self._max_stale_steps = int(np.ceil(self.max_state_age / self.dt))
+        self._u_hist = deque(maxlen=max(self.delay_steps + self._max_stale_steps, 1))
+        self._last_stale_warn = 0.0
         self.mpc.integrator.set('p', np.zeros(self.model.get_acados_model().p.size()[0]))
 
         # ── Run logger ────────────────────────────────────────────────────
@@ -151,13 +162,15 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         if self.run_log is not None:
             self.get_logger().info(f'Logging control steps to {self.run_log.path}')
 
-        # ── Control timer: 50 Hz  (must match dt) ────────────────────────
+        # ── Control timer: control_rate (= first MPC stage) ─────────────────
         self.create_timer(self.dt, self.cmdloop_callback)
 
         self.get_logger().info(
-            f'MPCInnerQuadrotor ready. Trajectory length: {self.traj_len} steps '
+            f'MPCInnerQuadrotor ready at {1.0 / self.dt:g} Hz '
+            f'(stages {sorted(set(np.round(self.mpc.time_steps * 1e3, 2)))} ms, horizon {self.mpc.Tf:.2f} s). '
+            f'Trajectory length: {self.traj_len} steps '
             f'({self.traj_len * self.dt:.1f} s), delay compensation: {self.delay_steps} step(s) '
-            f'({self.delay_steps * self.dt * 1e3:.0f} ms)')
+            f'({self.delay_steps * self.dt * 1e3:.0f} ms), max state age {self.max_state_age * 1e3:.0f} ms')
 
     # ──────────────────────────────────────────────────────────────────────
     #  Trajectory loading
@@ -165,30 +178,54 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
 
     def _load_trajectory(self, path: str):
         """
-        Load a pre-computed trajectory from a .npz file.
-        Falls back to a static hover at z=3 m if no valid path is given.
+        Load a pre-computed trajectory from a .npz file ('~' is expanded).
+        An empty path selects a static hover at z=3 m; a path that does not
+        exist is an error, so a typo cannot silently turn into a hover.
 
         Expected keys:  p (M,3), v (M,3), q (M,4), w (M,3)
-        Optional key:   t (M,)  — used only for logging
+        Optional key:   t (M,)  sample times; default 0.02 s spacing. The file
+                        is resampled to the control period if it differs.
         """
-        if path and os.path.isfile(path):
+        path = os.path.expanduser(path) if path else ''
+        if path and not os.path.isfile(path):
+            raise FileNotFoundError(f'trajectory_path does not exist: {path}')
+        if path:
             traj = np.load(path)
             self.traj_p = traj['p'].astype(np.float64)   # (M, 3)
             self.traj_v = traj['v'].astype(np.float64)   # (M, 3)
             self.traj_q = traj['q'].astype(np.float64)   # (M, 4)
             self.traj_w = traj['w'].astype(np.float64)   # (M, 3)
-            self.get_logger().info(f'Loaded trajectory from {path}')
+            t_src = traj['t'].astype(np.float64) if 't' in traj else 0.02 * np.arange(len(self.traj_p))
+            self._resample_trajectory(t_src)
+            self.get_logger().info(
+                f'Loaded trajectory from {path} ({len(t_src)} samples at '
+                f'{(t_src[1] - t_src[0]) * 1e3:.2f} ms → {self.traj_p.shape[0]} at {self.dt * 1e3:.2f} ms)')
         else:
             # Default: static hover at z = 3 m
-            M = 3000   # 60 s at 50 Hz — more than enough for any test
+            M = int(round(60.0 / self.dt))   # 60 s — more than enough for any test
             self.traj_p = np.tile([0., 0., 3.], (M, 1))
             self.traj_v = np.zeros((M, 3))
             self.traj_q = np.tile([1., 0., 0., 0.], (M, 1))
             self.traj_w = np.zeros((M, 3))
             self.get_logger().warn(
-                'No trajectory file given — using static hover at z=3 m.')
+                'No trajectory_path given — using static hover at z=3 m.')
 
         self.traj_len = self.traj_p.shape[0]
+
+    def _resample_trajectory(self, t_src):
+        """Resample the loaded trajectory onto the control period (index = step)."""
+        t_src = t_src - t_src[0]
+        if len(t_src) > 1 and abs((t_src[1] - t_src[0]) - self.dt) < 1e-9:
+            return
+        t_new = np.arange(0.0, t_src[-1] + 1e-9, self.dt)
+        lin = lambda a: np.stack([np.interp(t_new, t_src, a[:, i]) for i in range(a.shape[1])], axis=1)
+        q = self.traj_q.copy()
+        for i in range(1, len(q)):                       # keep one hemisphere before interpolating
+            if np.dot(q[i], q[i - 1]) < 0.0:
+                q[i] = -q[i]
+        q = lin(q)
+        self.traj_q = q / np.linalg.norm(q, axis=1, keepdims=True)
+        self.traj_p, self.traj_v, self.traj_w = lin(self.traj_p), lin(self.traj_v), lin(self.traj_w)
 
     def _log_meta(self, traj_path):
         meta = {
@@ -196,7 +233,10 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             'mass': self.model.mass, 'kf': self.model.kf,
             'omega_min': self.model.omega_min, 'omega_max': self.model.omega_max,
             'F_max': self.F_max, 'tau_max': np.asarray(self.tau_max).tolist(),
-            'delay_steps': self.delay_steps,
+            'delay_steps': self.delay_steps, 'actuation_delay': self.actuation_delay,
+            'control_rate': 1.0 / self.dt, 'time_steps': self.mpc.time_steps.tolist(),
+            'stage_offsets': self.mpc.stage_offsets.tolist(),
+            'max_state_age': self.max_state_age,
         }
         # Cost weights as compiled into the loaded solver.
         mpc_dir = os.path.dirname(sys.modules[MultirotorInnerMPC.__module__].__file__)
@@ -253,13 +293,20 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         self.v = np.array([ msg.vy, msg.vx, -msg.vz])
 
     # ──────────────────────────────────────────────────────────────────────
-    #  Main control loop  (50 Hz)
+    #  Main control loop  (control_rate, default 120 Hz)
     # ──────────────────────────────────────────────────────────────────────
 
     def cmdloop_callback(self):
         t_loop = time.time()
 
+        # Age of the stalest state input (inf before the first message).
+        ages = [t_loop - t for t in self._rx_time.values()]
+        state_age = np.inf if np.isnan(ages).any() else max(ages)
+        too_stale = state_age > self.max_state_age
+
         # ── 1. Offboard heartbeat ──────────────────────────────────────────
+        # Withheld while flying on a too-old state, so PX4's offboard-loss
+        # failsafe (COM_OF_LOSS_T, COM_OBL_RC_ACT) takes over.
         # direct_actuator = True routes through control_allocator,
         # bypassing PX4's attitude and rate controllers entirely.
         offboard_msg = OffboardControlMode()
@@ -271,7 +318,8 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         offboard_msg.body_rate       = False
         offboard_msg.direct_actuator = False
         offboard_msg.thrust_and_torque = True
-        self.offboard_mode_pub.publish(offboard_msg)
+        if not (too_stale and self._active):
+            self.offboard_mode_pub.publish(offboard_msg)
 
         # ── Guard: skip solve until armed and in offboard mode ─────────────
         # The offboard heartbeat above must always publish (PX4 requires it
@@ -291,16 +339,36 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             self._active = True
             # Before OFFBOARD, PX4's own controllers were holding a hover.
             self._u_hist.clear()
-            self._u_hist.extend([self.u_hover] * self.delay_steps)
+            self._u_hist.extend([self.u_hover] * self._u_hist.maxlen)
             if self.run_log is not None:
                 self.run_log.start_window()
 
         # ── 2. State vector  [p, v, q, w]  shape (13,) ────────────────────
         x0 = np.concatenate([self.p, self.v, self.q, self.w])
 
+        if too_stale:
+            # No usable state: publish nothing (PX4 holds the last command until
+            # its offboard-loss timeout) and re-seed the solver on recovery.
+            self._solver_warmed_up = False
+            self._u_hist.append(self._u_hist[-1])
+            if t_loop - self._last_stale_warn > 1.0:
+                self._last_stale_warn = t_loop
+                self.get_logger().warn(
+                    f'State {state_age * 1e3:.0f} ms old (> {self.max_state_age * 1e3:.0f} ms): '
+                    'not commanding, heartbeat withheld.')
+            if self.run_log is not None:
+                self.run_log.log(t_loop=t_loop, traj_idx=self.traj_idx, nav_state=self.nav_state,
+                                 x0=x0, status=-2, stale_steps=np.nan,
+                                 **self._age_fields(t_loop))
+            self.traj_idx = min(self.traj_idx + 1, self.traj_len - 1)
+            return
+
         # ── Delay compensation: plan from where the vehicle will be when this
         # command takes effect, by replaying the commands still in flight.
-        x_comp = self._propagate(x0)
+        # A stale measurement (no new message for > 1 step) is propagated
+        # further, through the commands sent since it arrived.
+        stale_steps = int(max(state_age - self.dt, 0.0) // self.dt)
+        x_comp = self._propagate(x0, self.delay_steps + stale_steps)
 
         # ── Warm-start on first entry into active control ──────────────────
         # Acados initialises all stages to the x0 from setup (z=0, level).
@@ -323,9 +391,10 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
         # Each stage k receives the reference at time t + k·dt so the MPC
         # looks ahead along the trajectory, not just at a static point.
         # model.p = [p_ref(3), v_ref(3), q_ref(4), w_ref(3)]  → 13 values
-        # Stage 0 is delay_steps ahead of the measurement, so is its reference.
+        # Stage 0 is delay_steps ahead of the measurement, so is its reference;
+        # stage k starts stage_offsets[k] control periods after stage 0.
         for k in range(self.mpc.N + 1):
-            idx = min(self.traj_idx + self.delay_steps + k, self.traj_len - 1)
+            idx = min(self.traj_idx + self.delay_steps + self.mpc.stage_offsets[k], self.traj_len - 1)
             p_param = np.concatenate([
                 self.traj_p[idx],   # p_ref
                 self.traj_v[idx],   # v_ref
@@ -340,12 +409,7 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             t_loop=t_loop, traj_idx=self.traj_idx, nav_state=self.nav_state, x0=x0, x_comp=x_comp,
             x_ref=np.concatenate([self.traj_p[idx0], self.traj_v[idx0],
                                   self.traj_q[idx0], self.traj_w[idx0]]),
-            age_att=t_loop - self._rx_time['att'],
-            age_angvel=t_loop - self._rx_time['angvel'],
-            age_lpos=t_loop - self._rx_time['lpos'],
-            px4_ts_att=self._px4_ts['att'],
-            px4_ts_angvel=self._px4_ts['angvel'],
-            px4_ts_lpos=self._px4_ts['lpos'],
+            stale_steps=stale_steps, **self._age_fields(t_loop),
         )
         try:
             simU, simX = self.mpc.solve(x_comp)
@@ -353,8 +417,7 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
             self.get_logger().warn(f'MPC solve failed: {e}')
             self._solver_warmed_up = False   # force re-seed on next call
             # Nothing is published, so PX4 keeps applying the previous command.
-            if self.delay_steps:
-                self._u_hist.append(self._u_hist[-1])
+            self._u_hist.append(self._u_hist[-1])
             if self.run_log is not None:
                 self.run_log.log(**log_row, t_solved=time.time(),
                                  status=self.mpc.ocp_solver.get_status(),
@@ -420,19 +483,26 @@ class MPCInnerQuadrotor(Node, ECRLLoggerMixin):
                               self.traj_w[idx_d][2]])                 # R4 [g, ω_ref]
         self.ecrl_log_step(x_ecrl, x_d_ecrl, u_ecrl, u_d_ecrl)
 
-        if self.delay_steps:
-            self._u_hist.append(u0.astype(float))
+        self._u_hist.append(u0.astype(float))
 
         # ── 10. Advance trajectory index ───────────────────────────────────
         # Advance every control step; hold at last point when done.
         self.traj_idx = min(self.traj_idx + 1, self.traj_len - 1)
 
-    def _propagate(self, x):
-        """Integrate x forward through the commands still in flight (one dt each)."""
-        if not self.delay_steps:
+    def _age_fields(self, t_loop):
+        return dict(age_att=t_loop - self._rx_time['att'],
+                    age_angvel=t_loop - self._rx_time['angvel'],
+                    age_lpos=t_loop - self._rx_time['lpos'],
+                    px4_ts_att=self._px4_ts['att'],
+                    px4_ts_angvel=self._px4_ts['angvel'],
+                    px4_ts_lpos=self._px4_ts['lpos'])
+
+    def _propagate(self, x, n):
+        """Integrate x forward through the last n commands sent (one dt each)."""
+        if n <= 0:
             return x
         x = x.copy()
-        for u in self._u_hist:
+        for u in list(self._u_hist)[-n:]:
             x = self.mpc.integrator.simulate(x=x, u=u)
             x[6:10] /= np.linalg.norm(x[6:10])
         return x
@@ -455,8 +525,11 @@ def main(args=None):
     finally:
         node._save_run_log()
         node.ecrl_save()          # flush collected samples to /tmp/ecrl_log/
-        node.destroy_node()
-        rclpy.shutdown()
+        try:                      # launch may send a second SIGINT while tearing down
+            node.destroy_node()
+            rclpy.try_shutdown()
+        except (KeyboardInterrupt, ExternalShutdownException):
+            pass
 
 
 if __name__ == '__main__':

@@ -73,7 +73,7 @@ int multirotor_inner_model_acados_sim_create(multirotor_inner_model_sim_solver_c
     const int np = MULTIROTOR_INNER_MODEL_NP;
     bool tmp_bool;
 
-    double Tsim = 0.02;
+    double Tsim = 0.008333333333333333;
 
     capsule->acados_sim_mem = NULL;
 
